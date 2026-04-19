@@ -5,6 +5,7 @@ from ipaddress import IPv4Network
 
 from astrameter.config import ClientFilter
 from astrameter.powermeter import Powermeter, ThrottledPowermeter
+from astrameter.request_dedupe import RequestDeduplicator
 from astrameter.shelly.shelly import Shelly
 
 
@@ -15,6 +16,61 @@ class DummyPowermeter(Powermeter):
     async def get_powermeter_watts(self):
         self.call_count += 1
         return [1.0]
+
+
+class _FakeClock:
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+class _FakeTransport:
+    def __init__(self) -> None:
+        self.sent: list[tuple[bytes, tuple]] = []
+
+    def sendto(self, data: bytes, addr: tuple) -> None:
+        self.sent.append((data, addr))
+
+
+async def test_dedupe_window_drops_rapid_duplicates():
+    # Drive the handler directly with a fake transport and a fake clock so
+    # the test is independent of wall-clock time and real UDP delivery.
+    dummy = DummyPowermeter()
+    cf = ClientFilter([IPv4Network("127.0.0.1/32")])
+    shelly = Shelly(
+        [(dummy, cf, False)],
+        udp_port=0,
+        device_id="test",
+        dedupe_time_window=10.0,
+    )
+    clock = _FakeClock()
+    shelly._dedup = RequestDeduplicator(10.0, clock=clock)
+
+    transport = _FakeTransport()
+    req = json.dumps(
+        {"id": 1, "src": "cli", "method": "EM.GetStatus", "params": {"id": 0}}
+    ).encode()
+    addr = ("127.0.0.1", 54321)
+
+    # First request: accepted and a response is sent.
+    await shelly._handle_request(transport, req, addr)
+    assert len(transport.sent) == 1
+    assert dummy.call_count == 1
+
+    # Second request within the window: dropped. Same source IP, different
+    # port (mirroring real Shelly batteries which use ephemeral ports).
+    clock.now = 1.0
+    await shelly._handle_request(transport, req, ("127.0.0.1", 54322))
+    assert len(transport.sent) == 1
+    assert dummy.call_count == 1
+
+    # After the window elapses, requests are answered again.
+    clock.now = 11.5
+    await shelly._handle_request(transport, req, ("127.0.0.1", 54323))
+    assert len(transport.sent) == 2
+    assert dummy.call_count == 2
 
 
 async def test_multiple_requests_with_throttling():
@@ -56,7 +112,7 @@ async def test_multiple_requests_with_throttling():
         await shelly.stop()
 
 
-async def _send_req(port, request_id):
+async def _send_req(port, request_id, timeout=2.0):
     loop = asyncio.get_running_loop()
     transport, protocol = await loop.create_datagram_endpoint(
         lambda: _ClientProtocol(),
@@ -71,7 +127,7 @@ async def _send_req(port, request_id):
             "params": {"id": 0},
         }
         transport.sendto(json.dumps(req).encode(), ("127.0.0.1", port))
-        data = await asyncio.wait_for(protocol.received, timeout=2.0)
+        data = await asyncio.wait_for(protocol.received, timeout=timeout)
         return json.loads(data.decode())["id"]
     finally:
         transport.close()

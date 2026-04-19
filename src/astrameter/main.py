@@ -123,6 +123,10 @@ async def run_device(
 
     device: CT002 | Shelly
 
+    global_dedupe_time_window = cfg.getfloat(
+        "GENERAL", "DEDUPE_TIME_WINDOW", fallback=0.0
+    )
+
     if device_type in ["ct002", "ct003"]:
         ct_section = get_ct_section(device_type, cfg)
         ct_type = "HME-4" if device_type == "ct002" else "HME-3"
@@ -130,7 +134,7 @@ async def run_device(
         ct_udp_port = cfg.getint(ct_section, "UDP_PORT", fallback=UDP_PORT)
         wifi_rssi = cfg.getint(ct_section, "WIFI_RSSI", fallback=-50)
         dedupe_time_window = cfg.getfloat(
-            ct_section, "DEDUPE_TIME_WINDOW", fallback=0.0
+            ct_section, "DEDUPE_TIME_WINDOW", fallback=global_dedupe_time_window
         )
         consumer_ttl = cfg.getint(ct_section, "CONSUMER_TTL", fallback=120)
         debug_status = cfg.getboolean(ct_section, "DEBUG_STATUS", fallback=False)
@@ -149,7 +153,6 @@ async def run_device(
             ct_section, "ERROR_REDUCE_THRESHOLD", fallback=20
         )
         balance_deadband = cfg.getint(ct_section, "BALANCE_DEADBAND", fallback=15)
-        deadband = cfg.getint(ct_section, "DEADBAND", fallback=20)
         max_correction_per_step = cfg.getint(
             ct_section, "MAX_CORRECTION_PER_STEP", fallback=80
         )
@@ -223,7 +226,6 @@ async def run_device(
             error_boost_max=error_boost_max,
             error_reduce_threshold=error_reduce_threshold,
             balance_deadband=balance_deadband,
-            deadband=deadband,
             max_correction_per_step=max_correction_per_step,
             max_target_step=max_target_step,
             saturation_detection=saturation_detection,
@@ -260,22 +262,42 @@ async def run_device(
     elif device_type == "shellypro3em_old":
         logger.debug("Shelly Pro 3EM Settings:")
         logger.debug(f"Device ID: {device_id}")
-        device = Shelly(powermeters=powermeters, device_id=device_id, udp_port=1010)
+        device = Shelly(
+            powermeters=powermeters,
+            device_id=device_id,
+            udp_port=1010,
+            dedupe_time_window=global_dedupe_time_window,
+        )
 
     elif device_type == "shellypro3em_new":
         logger.debug("Shelly Pro 3EM Settings:")
         logger.debug(f"Device ID: {device_id}")
-        device = Shelly(powermeters=powermeters, device_id=device_id, udp_port=2220)
+        device = Shelly(
+            powermeters=powermeters,
+            device_id=device_id,
+            udp_port=2220,
+            dedupe_time_window=global_dedupe_time_window,
+        )
 
     elif device_type == "shellyemg3":
         logger.debug("Shelly EM Gen3 Settings:")
         logger.debug(f"Device ID: {device_id}")
-        device = Shelly(powermeters=powermeters, device_id=device_id, udp_port=2222)
+        device = Shelly(
+            powermeters=powermeters,
+            device_id=device_id,
+            udp_port=2222,
+            dedupe_time_window=global_dedupe_time_window,
+        )
 
     elif device_type == "shellyproem50":
         logger.debug("Shelly Pro EM 50 Settings:")
         logger.debug(f"Device ID: {device_id}")
-        device = Shelly(powermeters=powermeters, device_id=device_id, udp_port=2223)
+        device = Shelly(
+            powermeters=powermeters,
+            device_id=device_id,
+            udp_port=2223,
+            dedupe_time_window=global_dedupe_time_window,
+        )
 
     else:
         raise ValueError(f"Unsupported device type: {device_type}")

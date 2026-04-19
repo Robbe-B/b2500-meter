@@ -11,6 +11,7 @@ from typing import Any
 from astrameter.config import ClientFilter
 from astrameter.config.logger import logger
 from astrameter.powermeter import Powermeter
+from astrameter.request_dedupe import RequestDeduplicator
 
 BATTERY_INACTIVE_TIMEOUT_SECONDS = 120
 POLL_INTERVAL_EMA_ALPHA = 0.3
@@ -38,6 +39,7 @@ class Shelly:
         powermeters: list[tuple[Powermeter, ClientFilter, bool]],
         udp_port: int,
         device_id,
+        dedupe_time_window: float = 0.0,
     ):
         self._udp_port = udp_port
         self._device_id = device_id
@@ -49,6 +51,10 @@ class Shelly:
         self._inactive_batteries: set[str] = set()
         self._stopped = asyncio.Event()
         self._inactive_check_task = None
+        self._dedupe_time_window = max(0.0, dedupe_time_window)
+        self._dedup: RequestDeduplicator[str] = RequestDeduplicator(
+            self._dedupe_time_window
+        )
         self.event_listener: Callable[[str, str, dict[str, Any]], None] | None = None
 
     def _calculate_derived_values(self, power):
@@ -187,6 +193,10 @@ class Shelly:
     async def _handle_request(self, transport, data, addr):
         poll_interval = self._track_battery_seen(addr)
 
+        if not self._dedup.should_process(addr[0]):
+            logger.debug("Ignoring request from %s due to dedupe window", addr)
+            return
+
         try:
             request_str = data.decode()
         except UnicodeDecodeError:
@@ -270,6 +280,12 @@ class Shelly:
             while True:
                 await asyncio.sleep(1.0)
                 self._log_inactive_batteries()
+                # Keep dedup entries until they've aged past both the
+                # inactive-battery horizon and the configured window, so
+                # windows greater than 120s are still honored.
+                self._dedup.purge_older_than(
+                    max(BATTERY_INACTIVE_TIMEOUT_SECONDS, self._dedupe_time_window)
+                )
         except asyncio.CancelledError:
             pass
 
