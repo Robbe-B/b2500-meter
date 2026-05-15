@@ -30,7 +30,10 @@ The tests here cover:
    default-to-DC safety policy is in effect),
  * the fix path with recognised Venus / B2500 prefixes,
  * discharge unaffected,
- * the degenerate all-DC-under-surplus case.
+ * the degenerate all-DC-under-surplus case,
+ * issue #359: brief negative-grid transients in a pure-DC pool must
+   not trigger the charge-blind/steer-to-zero path that exists only
+   to protect a co-resident Venus.
 """
 
 from __future__ import annotations
@@ -487,3 +490,113 @@ def test_unknown_device_type_deadlock_persists() -> None:
         f"With unknown device_types nobody charges; expected grid ~= -600 W, got "
         f"{avg_grid:.0f} W"
     )
+
+
+# ---------------------------------------------------------------------------
+# Issue #359: brief negative-grid transient must not collapse a pure-DC pool
+# ---------------------------------------------------------------------------
+
+
+def test_transient_surplus_does_not_collapse_dc_only_pool() -> None:
+    """A brief load drop while DC batteries are discharging stays smooth.
+
+    Pure B2500 pool (no Venus) discharging ~380 W each to meet a 760 W
+    house load.  At tick 30 the load drops to 745 W, so for one tick
+    the grid reads -15 W (batteries are still at 760 W combined).
+    Under issue #359 this would fire ``charge_blind`` for every reporter
+    and ``_steer_to_zero`` would slam both inverters down by ~380 W,
+    causing a full re-ramp cycle.  With the fix ``in_charge_territory``
+    stays off when no AC-chargeable battery is reporting, so the
+    fair-share path handles the transient with a small (~-8 W) trim.
+    """
+    a = DCOnlyBattery("dc_a", device_type="HMJ-2")
+    b = DCOnlyBattery("dc_b", device_type="HMJ-2")
+
+    clock = _FakeClock()
+    lb = _make_balancer(clock)
+
+    def house_load(tick: int) -> float:
+        return 760.0 if tick < 30 else 745.0
+
+    power_trace: dict[str, list[float]] = {"dc_a": [], "dc_b": []}
+    for tick in range(45):
+        reports = {
+            bat.mac: {
+                "phase": "A",
+                "power": round(bat.power),
+                "device_type": bat.device_type,
+            }
+            for bat in (a, b)
+        }
+        grid_total = house_load(tick) - sum(bat.power for bat in (a, b))
+        for bat in (a, b):
+            delta = lb.compute_target(
+                consumer_id=bat.mac,
+                consumer_mode=ConsumerMode("auto"),
+                all_reports=reports,
+                grid_total=grid_total,
+                inactive=frozenset(),
+                manual=frozenset(),
+                sample_id=(tick,),
+            )[0]
+            bat.step(delta, reports[bat.mac]["power"])
+            power_trace[bat.mac].append(bat.power)
+        clock.advance(1.0)
+
+    # After the drop the batteries should settle near 372 W each
+    # (745 W shared evenly), not collapse to 0.
+    for mac in ("dc_a", "dc_b"):
+        tail = power_trace[mac][-10:]
+        assert min(tail) > 300, f"{mac} collapsed after transient surplus: tail={tail}"
+        assert max(tail) < 400, f"{mac} overshot after transient surplus: tail={tail}"
+
+
+def test_sustained_surplus_dc_only_balancer_never_asks_to_discharge() -> None:
+    """Under sustained surplus the balancer itself must not command discharge.
+
+    Previously ``_steer_to_zero`` guaranteed every DC-only target was 0
+    under surplus.  With the issue #359 fix the all-DC path falls
+    through to fair-share, so the safety property now rests on the
+    sign-clamp at the tail of ``_compute_auto_target`` (``grid_total <
+    0 and target > 0 → 0``) plus fair-share producing a non-positive
+    share of a negative grid.
+
+    Pin the batteries at 0 W (simulating the B2500's AC-charge clamp)
+    and verify the balancer's emitted target stays ``<= 0`` for every
+    tick — i.e. the balancer never instructs a DC-only battery to
+    discharge into a surplus.  Complements
+    ``test_all_dc_under_surplus_holds_zero_and_logs``, which exercises
+    the full closed-loop including the simulated battery's own clamp.
+    """
+    macs = ("dc_a", "dc_b")
+    clock = _FakeClock()
+    lb = _make_balancer(clock)
+    surplus = 600.0
+
+    max_target_seen: dict[str, float] = {m: float("-inf") for m in macs}
+    for tick in range(200):
+        # Batteries pinned at 0 W (real B2500 cannot accept AC charge).
+        reports = {m: {"phase": "A", "power": 0, "device_type": "HMJ-1"} for m in macs}
+        grid_total = -surplus  # nothing absorbs, so grid stays at -600 W
+        for m in macs:
+            delta = lb.compute_target(
+                consumer_id=m,
+                consumer_mode=ConsumerMode("auto"),
+                all_reports=reports,
+                grid_total=grid_total,
+                inactive=frozenset(),
+                manual=frozenset(),
+                sample_id=(tick,),
+            )[0]
+            # Target is a delta added to reported power (0 here), so the
+            # commanded absolute power equals ``delta``.  Under surplus
+            # this must never be positive.
+            assert delta <= 0, (
+                f"tick {tick}: balancer asked {m} to discharge into "
+                f"a {grid_total:.0f} W surplus (delta={delta})"
+            )
+            max_target_seen[m] = max(max_target_seen[m], delta)
+        clock.advance(1.0)
+
+    for m, peak in max_target_seen.items():
+        assert peak <= 0, f"{m} peak target under surplus was {peak} (expected <= 0)"
