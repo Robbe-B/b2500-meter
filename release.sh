@@ -81,10 +81,10 @@ fi
 
 # Require at least one list item under ## Next (before the next ## heading)
 if ! awk '
-/^## Next$/ { in=1; found=0; next }
-in && /^## / { exit !found }
-in && /^[[:space:]]*- / { found=1 }
-END { if (in) exit !found; exit 0 }
+/^## Next$/ { in_next=1; found=0; next }
+in_next && /^## / { exit !found }
+in_next && /^[[:space:]]*- / { found=1 }
+END { if (in_next) exit !found; exit 0 }
 ' CHANGELOG.md; then
   print_error "## Next must include at least one bullet line (e.g. lines starting with \"- \")."
   exit 1
