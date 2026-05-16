@@ -36,25 +36,26 @@ if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   exit 1
 fi
 
+print_info "Fetching origin..."
+git fetch origin
+
+# GitHub Actions checkout commonly leaves detached HEAD at origin/develop; only the SHA must match.
 CURRENT_BRANCH=$(git branch --show-current)
-if [ "$CURRENT_BRANCH" != "develop" ]; then
+if [ -n "$CURRENT_BRANCH" ] && [ "$CURRENT_BRANCH" != "develop" ]; then
   print_error "You must be on branch develop (current: $CURRENT_BRANCH)"
+  exit 1
+fi
+
+LOCAL=$(git rev-parse HEAD)
+REMOTE=$(git rev-parse origin/develop)
+if [ "$LOCAL" != "$REMOTE" ]; then
+  print_error "HEAD is not at origin/develop. Run: git pull origin develop"
   exit 1
 fi
 
 if [ -n "$(git status --porcelain)" ]; then
   print_error "Working tree is not clean."
   git status --short
-  exit 1
-fi
-
-print_info "Fetching origin..."
-git fetch origin
-
-LOCAL=$(git rev-parse develop)
-REMOTE=$(git rev-parse origin/develop)
-if [ "$LOCAL" != "$REMOTE" ]; then
-  print_error "develop is not up to date with origin/develop. Run: git pull origin develop"
   exit 1
 fi
 
